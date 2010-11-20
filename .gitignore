@@ -1,0 +1,17 @@
+.DS_Store
+._*
+*.log
+*.tmproj
+#*
+.\#*
+\#*
+*.jar
+classes/*
+lib/*
+target/*
+test/*
+*.pdf
+.cake
+pom.xml
+lit-doc
+build/
