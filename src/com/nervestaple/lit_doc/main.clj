@@ -18,7 +18,8 @@
 ;;
 ;; The functions in this file have several dependencies:
 ;;
-;; * All logging is done with Clojure Contrib's logging functions
+;; * Exception logging is done with Clojure Contrib's logging
+;; functions
 ;;
 ;; * We're using Clojure Contrib's command-line functions to parse
 ;; arguments passed in from the shell
@@ -34,8 +35,7 @@
   (:use
    [clojure.contrib.logging]
    [clojure.contrib.command-line]
-   [hiccup.core]
-   [com.nervestaple.lit-doc.html-template])
+   [hiccup.core])
   (:require
    [clojure.contrib.duck-streams :as duck-streams])
   (:import
@@ -43,12 +43,10 @@
    (org.pegdown PegDownProcessor)
    (org.pegdown Parser)))
 
-;; We want to instantiate one PegDownProcessor and then keep using the
-;; one as it's expensive to create.
-;;
 ;; We're using PegDown to transform the text of the comment into
 ;; HTML. Here we turn on the smart quotes, dashes, ellipse and the
-;; url-to-link extensions.
+;; url-to-link extensions. We want to instantiate one PegDownProcessor
+;; and then keep using the one as it's expensive to create.
 (def *comment-processor* (PegDownProcessor.
                           (bit-or Parser/SMARTYPANTS Parser/AUTOLINKS)))
 
@@ -56,8 +54,8 @@
 ;; function takes a File as its argument and returns a list of line
 ;; numbers and the text of that line. The results look like...
 ;;
-;;     ((0 "(defn my-function [arg1]")
-;;      (1 "  (println arg1))"))
+;; >     ((0 "(defn my-function [arg1]")
+;; >      (1 "  (println arg1))"))
 ;;
 (defn get-lines
   [source-file]
@@ -76,7 +74,9 @@
       true)))
 
 ;; This function returns true if the line is a comment and if it's
-;; inline, that is, if it's mixed in with code.
+;; inline, that is, if it's mixed in with code. Again, it's not very
+;; clever. If the line starts with any number of spaces it's assumed
+;; that it's mixed in with code.
 (defn is-inline-comment?
   [line-text]
   (if (is-comment? line-text)
@@ -88,29 +88,43 @@
 ;; found in that file. The data structure looks like...
 ;;
 ;;     [{:type :comment :lines ((0 "this is a comment")
-;;                              (1 "this is another one"))}
+;;                              (1 "this is another one"))
+;;       :inline false}
 ;;      {:type :code    :lines ((2 "(defn myfunction [arg1]")
-;;                              (3 "  (println arg1))"))}]
+;;                              (3 "  (println arg1))"))
+;;       :inline false}]
 ;;
+;; Code that is mixed in with text will have an :inline key set to
+;; true.
 (defn parse-file
   [source-file]
 
+  ;; We start out with a sequence of line numbers and lines of code
+  ;; for the file.
   (let [lines (get-lines source-file)]
 
     ;; We loop through the lines of source code one at a time and
-    ;; recur with the remaining lines, a flag to indicate the type of
-    ;; data we're currently parsing, a vector of the lines of data
-    ;; we're currently collecting (comments or code) and a vector of
-    ;; the data structure we're building.
+    ;; recur with:
+    ;;
+    ;; * the next line of data
+    ;;
+    ;; * the remaining lines of data
+    ;;
+    ;; * a flag to indicate the type of data we're currently parsing
+    ;;
+    ;; * a vector of the lines of data we're currently collecting
+    ;; (comments or code)
+    ;;
+    ;; * a vector of the data structure we're building.
     (loop [line-in (first lines) lines (rest lines)
            parsing nil chunk [] parsed []]
+      
       (cond
 
-        ;; If we're out of lines, return the parsed data
+        ;; If we're out of lines, return the parsed data. If we have
+        ;; some lines collected, add them to our parsed data as either
+        ;; code or comments
         (nil? line-in)
-
-        ;; if we have some lines collected, add them to our parsed
-        ;; data as either code or comments
         (if (< 0 (count chunk))
           (if (= :code parsing)
             (conj parsed {:type :code :lines chunk})
@@ -119,6 +133,13 @@
                                     true false)}))
           parsed)
 
+        ;; We're going to add our run of either comments or code to
+        ;; the chunk vector. When our run ends, we're going to add
+        ;; that chunk to the parsed vector as a hash-map and then
+        ;; clear the chunk out to ready it for the next run. If we're
+        ;; adding a chunk of inline comments to the parsed vector, we
+        ;; set the :inline key for that whole chunk to true.
+        
         (is-comment? (second line-in))
         (recur (first lines) (rest lines) :comment
                (if (not= parsing :comment) [line-in] (conj chunk line-in))
@@ -136,29 +157,30 @@
 ;; Here we have a simple function for rendering a line of code, this
 ;; will be used to build up a chunk of HTML that represents a run of
 ;; code. Again, not to sophisticated; it accepts a line of code and
-;; then spits out the line number and the text of the line.
+;; returns a String of HTML.
 (defn render-code-line
   [line-in]
   (str (second line-in) "\n"))
 
-;; This function takes a sequence of lines and emits a chunk of
-;; pre-formatted HTML to standard out.
+;; This function takes a sequence of lines containing source code and
+;; emits a String of HTML.
 (defn render-code
   [source-lines]
   (if (< 0 (count source-lines))
-    (println (html [:pre {:class (str "code prettyprint lang-lisp "
-                                      ;"linenums:" (first (first source-lines))
-                                      )}
-                    (h (apply str (map render-code-line source-lines)))]))))
+    (html [:pre {:class (str "code prettyprint lang-lisp "
+                             ;"linenums:" (first (first source-lines))
+                             )}
+           (h (apply str (map render-code-line source-lines)))])))
 
 ;; Rendering a line of comment is a little more complicated than code
-;; but not a lot. This function accepts a line and returns either the
-;; text of the comment or a line break if the line has only whitespace
-;; or is empty.
+;; but not a lot. This function accepts a line and returns a String
+;; containing either the text of the comment or a line break if the
+;; line has only whitespace or is empty.
 ;;
 ;; What it's doing is removing the two leading semicolons and the
 ;; space immediately after them (if present). We lose the line break
-;; at the end when we read the text in so we add that back to the end.
+;; at the end when we read the text in so we add that back to the
+;; end.
 (defn render-comment-line
   [line-in]
   (let [trimmed-line (.trim (second line-in))]
@@ -170,65 +192,74 @@
         (str stripped-line "\n")
         "\n"))))
 
-;; This function takes a sequence of lines and emits a chunk of HTML
-;; with the contents of the comment.
+;; This function takes a sequence of lines containing comments and
+;; returns a String of HTML.
 (defn render-comment
   [source-lines]
   (if (< 0 (count source-lines))
 
     ;; We invoke PegDownProcessor to transform our comments into HTML.
-    (println
-     (.markdownToHtml *comment-processor*
-                      (apply str (map render-comment-line source-lines))))))
+    (.markdownToHtml *comment-processor*
+                      (apply str (map render-comment-line source-lines)))))
 
 ;; This function wraps inline comments in a div so that we can style
 ;; them all fancy like.
 (defn render-inline-comment
   [source-lines]
-  (println "<div class=\"inline-comment\">")
-  (render-comment source-lines)
-  (println "</div>"))
+  (html [:div {:class "inline-comment"}
+         (render-comment source-lines)]))
 
-;; This function is looking a destination File for writing the HTML
-;; documentation and the source data that is returned by the
-;; parse-file function.
+;; This function returns a String of HTML (created by Hiccup and our
+;; Markdown processor) that represent the documentation.
 (defn render-file
-  [dest-file parsed-file]
+  [parsed-file]
 
-  ;; We're going to delete the destination file and replace it with a
-  ;; brand new file.
-  (if (.exists dest-file)
-    (.delete dest-file))
-  (.createNewFile dest-file)
+  ;; Hiccup is going to build up a nested sequence that represents our
+  ;; HTML document and then return a String that contains that
+  ;; HTML. First, we setup our header.
+  (html [:html {:xmlns "http://www.w3.org/1999/xhtml"
+                "xml:lang" "en"
+                :lang "en"}
+         [:head [:title "Literate Documentation"]
+          [:style {:type "text/css"}
+           (str "body {margin: 1in; font-family: Georgia, Cambria, "
+                "\"Times New Roman\", Times, serif;  width: 6.5in; "
+                "font-size: 12pt;}")
+           (str "pre, code, .code {font-family: Menlo, "
+                "\"Lucida Console\", Monaco, monospace; "
+                "font-size: 9pt;}")
+           (str ".code {width: 6.35in; margin-left: 0.15in;"
+                "border-left: 3px solid LightGray;
+                 padding-left: 0.05in;}")
+           (str "div.inline-comment{margin-top: 0; margin-bottom: 0; "
+                "border-collapse: collapse; border-top: 1px solid white; "
+                "border-bottom: 1px solid white;}")
+           (str ".inline-comment {margin-left: 0.15in; margin-right: 0.25in; "
+                "font-size: 10pt; padding-left: 0.20in; "
+                "border-left: 3px solid LightGray; margin-top: 0; "
+                "margin-bottom: 0;}")]]
 
-  ;; with-out-writer lets us capture anything written to standard out
-  ;; and writes it to the destination file instead.
-  (duck-streams/with-out-writer dest-file
+         ;; The body of our document is created by mapping over the
+         ;; parsed source code file and rendering each chunk of either
+         ;; comments or code to HTML.
+         [:body (map (fn [code-in]
+                       (cond
+                         
+                         (= :code (:type code-in))
+                         (render-code (:lines code-in))
 
-    (render-heading)
-
-    ;; We map over the parsed data structure and emit either code or
-    ;; comments.
-    (dorun
-     (map (fn [code-in]
-            (cond
-              
-              (= :code (:type code-in))
-              (dorun (render-code (:lines code-in)))
-
-              (and (= :comment (:type code-in)) (:inline code-in))
-              (dorun (render-inline-comment (:lines code-in)))
-              
-              (= :comment (:type code-in))
-              (dorun (render-comment (:lines code-in)))))
-          parsed-file))
-
-    (render-closing)))
+                         (and (= :comment (:type code-in)) (:inline code-in))
+                         (render-inline-comment (:lines code-in))
+                         
+                         (= :comment (:type code-in))
+                         (render-comment (:lines code-in))))
+                     parsed-file)]]))
 
 ;; This function takes two File objects as it's arguments, the
 ;; destination directory for the documentation and a source file to
 ;; process. It munges the name of the source file into one long
-;; filename to prevent name clashes and returns a new File object.
+;; filename to prevent name clashes and returns a new File object that
+;; lives inside the destination directory.
 (defn munge-file-name
   [dest-dir source-file]
   (File. dest-dir
@@ -249,13 +280,12 @@
             (and (< 4 (count (.getName path-in)))
                  (= ".clj" (apply str (take-last 4 (.getName path-in))))))
 
-          ;; Our recursive calls to get-paths builds a nested
-          ;; sequence, we want to flatten it into one list.
+          ;; We'll map over each file in the source directory. If the
+          ;; file represents a directory, we'll call ourselves
+          ;; recursively to get a list of all the files in that child
+          ;; directory. Our recursive calls to get-paths builds a
+          ;; nested sequence, we flatten that result into one list.
           (flatten
-
-           ;; We check each file in the directory, if it's a directory
-           ;; we recurse for its contents otherwise it's a file and we
-           ;; emit its File.
            (map (fn [path]
                   (if (.isDirectory path)
                     (get-paths path)
@@ -269,14 +299,15 @@
 (defn process-source
   [source dest]
 
+  (println (str "Reading source code from \"" source "\" and writing "
+             "documentation to \"" dest "\""))
+  
   ;; We need File representations of both paths
-  (let [source-dir (File. source)
-        dest-dir (File. dest)]
+  (let [source-dir (File. source)  dest-dir (File. dest)]
 
     ;; We make sure the source directory exists and is read-able.
     (if (not (.isDirectory source-dir))
       (throw (Exception. (str "\"" source-dir "\" is not a directory"))))
-
     (if (not (.canRead source-dir))
       (throw (Exception. (str "Cannot read from \"" source-dir "\""))))
 
@@ -285,22 +316,32 @@
       (.mkdirs dest-dir))
 
     ;; We double-check to make sure the destination directory is a
-    ;; url-to-link extensionsdirectory and is write-able.
+    ;; directory and is write-able.
     (if (not (.isDirectory dest-dir))
       (throw (Exception. (str "\"" dest-dir "\" is not a directory"))))
-
     (if (not (.canWrite dest-dir))
       (throw (Exception. (str "Cannot write to \"" dest-dir "\""))))
 
-    ;; We map over all of the files in the source directory.
-    (map (fn [source-path]
+    ;; We map over all of the files in the source directory...
+    (doall
+     (map (fn [source-path]
 
-           ;; We get a munged name to hold the documentation, the
-           ;; parsed data for the source file and then we render our
-           ;; documentation.
-           (render-file (munge-file-name dest-dir source-path)
-                        (parse-file source-path)))
-         (get-paths source-dir))))
+            ;; We munge the name of the source file to get the name of
+            ;; our destination file.
+            (let [dest-file (munge-file-name dest-dir source-path)]
+
+              ;; We delete the destination file and replace it with a
+              ;; brand new file.
+              (if (.exists dest-file)
+                (.delete dest-file))
+              (.createNewFile dest-file)
+              
+              ;; We render the source file to one large String of HTML
+              ;; and then print it to our destination file
+              (println (str "Generating documentation for \"" source-path "\""))
+              (duck-streams/with-out-writer dest-file
+                (print (render-file (parse-file source-path))))))
+          (get-paths source-dir)))))
 
 ;; This is the main entry point to our documentation generator, it
 ;; handles arguments when called from the command line. It will parse

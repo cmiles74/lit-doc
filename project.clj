@@ -6,4 +6,5 @@
                  [hiccup "0.3.1"]
                  [org.clojars.mcav/pegdown "0.8.5.1"]]
   :dev-dependencies [[swank-clojure "1.2.0"]]
-  :main com.nervestaple.lit-doc.main)
+  :main com.nervestaple.lit-doc.main
+  :resources-path "resources")
